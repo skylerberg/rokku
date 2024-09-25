@@ -4,6 +4,9 @@ extern crate strum_macros;
 use std::fmt;
 use std::ops;
 
+use mcts::MonteCarloTreeSearch;
+use mcts::Status;
+use mcts::VanillaMcts;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 
@@ -28,6 +31,15 @@ pub enum Piece {
 pub enum Color {
     White = 0,
     Black = 1,
+}
+
+impl Color {
+    pub fn opposite(&self) -> Self {
+        match self {
+            Color::White => Color::Black,
+            Color::Black => Color::White,
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, EnumIter)]
@@ -59,6 +71,15 @@ impl TurnState {
             TurnState::BlackFirstAction => Some((Color::Black, None)),
             TurnState::BlackSecondAction { used_piece } => Some((Color::Black, *used_piece)),
             TurnState::WonBy(_) => None,
+        }
+    }
+
+    pub fn get_color(&self) -> Option<Color> {
+        if let Some((color, _)) = self.get_matchable() {
+            Some(color)
+        }
+        else {
+            None
         }
     }
 }
@@ -213,12 +234,20 @@ impl Board {
             }
         }
     }
+
+    fn swap(&mut self, target: Coordinates, destination: Coordinates) {
+        let destination_contents = self.get_space(destination);
+        self.set_space(destination, self.get_space(target));
+        self.set_space(target, destination_contents);
+    }
+
 }
 
 #[derive(Clone)]
 pub struct Game {
     pub board: Board,
     pub supplies: [Vec<Token>; 2],  // [white_supply, black_supply]
+    pub hand_directions: [Direction; 2],  // [white_hand, black_hand]
     pub turn_state: TurnState,
 }
 
@@ -227,13 +256,45 @@ impl Game {
         Game {
             board: Board::new(),
             supplies: [
-                vec![Token::Hammer, Token::Wave],
-                vec![Token::Hammer, Token::Wave],
-                // TODO switch back to full supply
-                //vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
-                //vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
+                vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
+                vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
             ],
+            hand_directions: [Direction::Left, Direction::Right],
             turn_state: TurnState::WhiteFirstAction,
+        }
+    }
+
+    fn push(&mut self, target: Coordinates, direction: Direction, distance: usize) {
+        let current_position = target;
+        let next_position = target + direction;
+        for _ in 0..distance {
+            if next_position.is_off_board() {
+                match self.board.get_space(target) {
+                    Space::Occupied(Piece::GoodRock) => {},
+                    Space::Occupied(Piece::GoodRock2) => {},
+                    Space::Occupied(Piece::BadRock) => {},
+                    Space::Occupied(Piece::Token(color, token)) => {
+                        self.supplies[color as usize].push(token);
+                        self.board.set_space(current_position, Space::Empty);
+                    },
+                    Space::Empty => panic!("Attempted to push empty space"),
+                }
+                break;
+            }
+
+            if self.board.is_empty(next_position) {
+                self.board.move_to(current_position, next_position);
+            }
+        }
+    }
+
+    fn cascading_push(&mut self, target: Coordinates, direction: Direction, distance: usize) {
+        let next_position = target + direction;
+        if !next_position.is_off_board() && !self.board.is_empty(next_position) {
+            self.cascading_push(next_position, direction, distance);
+        }
+        if !target.is_off_board() && !self.board.is_empty(target) {
+            self.push(target, direction, distance);
         }
     }
 }
@@ -250,6 +311,11 @@ pub enum Choice {
 pub enum Ability {
     Hammer { target: Coordinates, direction: Direction, distance: usize },
     Wave { target: Coordinates, destination: Coordinates },
+    Scout { target: Coordinates, destination: Coordinates },
+    Daimyo { target: Coordinates, destination: Coordinates },
+    Hook { target: Coordinates, direction: Direction, distance: usize },
+    Bomb { origin: Coordinates },
+    Hand { origin: Coordinates, move_direction: Direction, hand_direction: Direction }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, EnumIter)]
@@ -302,23 +368,69 @@ impl mcts::Game for Game {
     fn get_all_choices(&self) -> Vec<Self::Choice> {
         let mut choices = vec![Choice::Pass];
         match self.turn_state.get_matchable() {
-            Some((color, _)) => {
+            Some((color, used_piece)) => {
+                let mut grabbed_space = None;
+                if let Some(hand_space) = self.board.find(Piece::Token(color.opposite(), Token::Hand)) {
+                    grabbed_space = Some(hand_space + self.hand_directions[color.opposite() as usize]);
+                }
 
                 for token in Token::iter() {
-                    if let Some(coordinates) = self.board.find(Piece::Token(color, token)) {
+                    if used_piece == Some(token) {
+                        continue
+                    }
 
-                        // Basic move
-                        for direction in Direction::iter() {
-                            let new_coordinates = coordinates + direction;
-                            if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
-                                choices.push(Choice::Move(token, direction));
+                    if let Some(coordinates) = self.board.find(Piece::Token(color, token)) {
+                        if let Some(space) = grabbed_space {
+                            if coordinates == space {
+                                continue;
+                            }
+                        }
+
+                        // Hand's move is implement as an ability
+                        if token != Token::Hand {
+                            // Basic move
+                            for direction in Direction::iter() {
+                                let new_coordinates = coordinates + direction;
+                                if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
+                                    choices.push(Choice::Move(token, direction));
+                                }
                             }
                         }
 
                         // Abilities
                         match token {
-                            Token::Daimyo => {},  // TODO add ability
-                            Token::Scout => {},  // TODO add ability
+                            Token::Daimyo => {
+                                for other_token in Token::iter() {
+                                    if other_token != Token::Daimyo && !self.supplies[color as usize].contains(&other_token) {
+                                        let target = self.board.find(Piece::Token(color, other_token)).unwrap();
+
+                                        if let Some(space) = grabbed_space {
+                                            if target == space {
+                                                continue;
+                                            }
+                                        }
+
+                                        for direction in Direction::iter() {
+                                            let destination = coordinates + direction;
+                                            if !destination.is_off_board() && self.board.is_empty(coordinates + direction) {
+                                                choices.push(Choice::UseAbility(Ability::Daimyo { target, destination }));
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            Token::Scout => {
+                                for direction in Direction::iter() {
+                                    let mut destination = coordinates + direction ;
+                                    if !destination.is_off_board() && !self.board.is_empty(destination) {
+                                        choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
+                                    }
+                                    destination = destination + direction;
+                                    if !destination.is_off_board() && !self.board.is_empty(destination) {
+                                        choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
+                                    }
+                                }
+                            },
                             Token::Hammer => {
                                 for direction in Direction::iter() {
                                     let target = coordinates + direction;
@@ -329,7 +441,25 @@ impl mcts::Game for Game {
                                     }
                                 }
                             },
-                            Token::Hook => {},  // TODO add ability
+                            Token::Hook => {
+                                for direction in Direction::iter() {
+                                    for distance_to_target in 2..=4 {
+                                        let mut target = coordinates;
+                                        for _ in 0..distance_to_target {
+                                            target = target + direction;
+                                        }
+                                        if !target.is_off_board() && !self.board.is_empty(target) {
+                                            for distance_to_pull in 1..distance_to_target {
+                                                choices.push(Choice::UseAbility(Ability::Hook {
+                                                    target,
+                                                    direction: direction.opposite(),
+                                                    distance: distance_to_pull,
+                                                }));
+                                            }
+                                        }
+                                    }
+                                }
+                            },
                             Token::Wave => {
                                 // TODO implement buffed version of Wave
                                 for direction in Direction::iter() {
@@ -342,8 +472,19 @@ impl mcts::Game for Game {
                                     }
                                 }
                             },
-                            Token::Hand => {},  // TODO add ability
-                            Token::Bomb => {},  // TODO add ability
+                            Token::Hand => {
+                                for move_direction in Direction::iter() {
+                                    let new_coordinates = coordinates + move_direction;
+                                    if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
+                                        for hand_direction in Direction::iter() {
+                                            choices.push(Choice::UseAbility(Ability::Hand{origin: coordinates, move_direction, hand_direction}));
+                                        }
+                                    }
+                                }
+                            },
+                            Token::Bomb => {
+                                choices.push(Choice::UseAbility(Ability::Bomb{ origin: coordinates }));
+                            },
                         }
                     }
                 }
@@ -359,10 +500,9 @@ impl mcts::Game for Game {
     }
 
     fn apply_choice(&mut self, choice: &Self::Choice) {
+        let mut used_piece = None;
         match self.turn_state.get_matchable() {
             Some((color, _)) => {
-                //self.board.print();
-                //println!("{:?} - {}", color, choice);
                 match choice {
                     Choice::Pass => {},
                     Choice::Deploy(token) => {
@@ -371,38 +511,40 @@ impl mcts::Game for Game {
                     },
                     Choice::Move(token, direction) => {
                         self.board.move_piece(Piece::Token(color, *token), *direction);
+                        used_piece = Some(*token);
                     },
                     Choice::UseAbility(ability) => {
                         match ability {
                             Ability::Hammer { target, direction, distance } => {
-                                //self.board.print();
-                                //println!("{:?} - {}", color, choice);
-                                let current_position = *target;
-                                let next_position = *target + *direction;
-                                for _ in 0..*distance {
-                                    if next_position.is_off_board() {
-                                        match self.board.get_space(*target) {
-                                            Space::Occupied(Piece::GoodRock) => {},
-                                            Space::Occupied(Piece::GoodRock2) => {},
-                                            Space::Occupied(Piece::BadRock) => {},
-                                            Space::Occupied(Piece::Token(color, token)) => {
-                                                self.supplies[color as usize].push(token);
-                                                self.board.set_space(current_position, Space::Empty);
-                                            },
-                                            Space::Empty => panic!("Attempted to Hammer empty space"),
-                                        }
-                                        break;
-                                    }
-
-                                    if self.board.is_empty(next_position) {
-                                        self.board.move_to(current_position, next_position);
-                                    }
-                                }
-                                //self.board.print();
-                                //println!("------");
+                                used_piece = Some(Token::Hammer);
+                                self.push(*target, *direction, *distance);
                             }
                             Ability::Wave { target, destination } => {
+                                used_piece = Some(Token::Wave);
                                 self.board.move_to(*target, *destination);
+                            }
+                            Ability::Scout { target, destination } => {
+                                used_piece = Some(Token::Scout);
+                                self.board.swap(*target, *destination);
+                            }
+                            Ability::Daimyo { target, destination } => {
+                                used_piece = Some(Token::Daimyo);
+                                self.board.move_to(*target, *destination);
+                            }
+                            Ability::Hook { target, direction, distance } => {
+                                used_piece = Some(Token::Hook);
+                                self.push(*target, direction.opposite(), *distance);
+                            }
+                            Ability::Bomb { origin } => {
+                                used_piece = Some(Token::Bomb);
+                                for direction in Direction::iter() {
+                                    self.cascading_push(*origin + direction, direction, 1);
+                                }
+                            }
+                            Ability::Hand { origin, move_direction, hand_direction } => {
+                                used_piece = Some(Token::Hand);
+                                self.board.move_to(*origin, *origin + *move_direction);
+                                self.hand_directions[color as usize] = *hand_direction;
                             }
                         }
                     }
@@ -414,7 +556,6 @@ impl mcts::Game for Game {
         let bad_rock_coordinates = self.board.find(Piece::BadRock).unwrap();
         let good_rock_coordinates = self.board.find(Piece::GoodRock).unwrap();
         let good_rock_2_coordinates = self.board.find(Piece::GoodRock2).unwrap();
-        //println!("{:?}", bad_rock_coordinates);
 
         if self.board.is_in_village(bad_rock_coordinates, Color::White) {
             self.turn_state = TurnState::WonBy(Color::Black);
@@ -435,14 +576,11 @@ impl mcts::Game for Game {
         }
 
         match self.turn_state {
-            // TODO set used_piece correctly
-            TurnState::WhiteFirstAction => self.turn_state = TurnState::WhiteSecondAction { used_piece: None },
+            TurnState::WhiteFirstAction => self.turn_state = TurnState::WhiteSecondAction { used_piece, },
             TurnState::WhiteSecondAction {..} => self.turn_state = TurnState::BlackFirstAction,
-            TurnState::BlackFirstAction => self.turn_state = TurnState::BlackSecondAction { used_piece: None },
+            TurnState::BlackFirstAction => self.turn_state = TurnState::BlackSecondAction { used_piece, },
             TurnState::BlackSecondAction {..} => self.turn_state = TurnState::WhiteFirstAction,
-            TurnState::WonBy(_) => {
-                println!("A game finished!!!");
-            },
+            TurnState::WonBy(_) => {},
         }
 
     }
@@ -457,10 +595,32 @@ impl mcts::Game for Game {
 }
 
 fn main() {
+    let iterations = 10000;
     let mut game = Game::new();
-    game.run(1000);
+    let mut mcts: VanillaMcts<Game> = VanillaMcts::new();
+    loop {
+        match game.status() {
+            Status::AwaitingAction(_) => {
+                let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), iterations);
+
+                game.board.print();
+                println!("{:?} - {}", game.turn_state.get_color(), choice);
+
+                game.apply_choice(&choice);
+
+                game.board.print();
+                println!("------");
+            }
+            Status::Terminated(_) => {
+                return;
+            }
+        }
+    }
 }
 
 // Rules questions:
 // Is it possible to tie? Same action puts all three rocks in one player's village?
 // Can a unit intentionally step off the edge of the map?
+// Can Daimyo teleport itself?
+// What orientation does Hand deploy in (not clarified in rules)?
+// Does Daimyo change hand direction?

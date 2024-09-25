@@ -55,6 +55,7 @@ pub trait Game: Clone {
         outcome.reward_for(player_id)
     }
 
+    // Meant for quick debugging purposes
     fn run(&mut self, iterations: usize) {
         let mut mcts: VanillaMcts<Self> = VanillaMcts::new();
         loop {
