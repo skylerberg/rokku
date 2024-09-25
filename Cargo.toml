@@ -5,6 +5,8 @@ authors = ["Skyler Berg <skylertheberg@gmail.com>"]
 edition = "2021"
 
 [dependencies]
+auto_enums = "0.8.2"
+colored = "2.1.0"
 mcts = { path = "./monte_carlo" }
 strum = { version = "0.26.3", features = ["derive"] }
 strum_macros = "0.26.4"

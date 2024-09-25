@@ -1,14 +1,18 @@
+extern crate colored;
 extern crate strum;
 extern crate strum_macros;
 
 use std::fmt;
 use std::ops;
 
+use strum::IntoEnumIterator;
+use strum_macros::EnumIter;
+use colored::Colorize;
+use auto_enums::auto_enum;
+
 use mcts::MonteCarloTreeSearch;
 use mcts::Status;
 use mcts::VanillaMcts;
-use strum::IntoEnumIterator;
-use strum_macros::EnumIter;
 
 
 use mcts::Game as MctsGame;
@@ -19,12 +23,36 @@ pub enum Space {
     Occupied(Piece),
 }
 
+impl fmt::Display for Space {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Space::Empty => write!(f, "⚫"),
+            Space::Occupied(piece) => write!(f, "{}", piece),
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Piece {
     GoodRock,
     GoodRock2,
     BadRock,
     Token(Color, Token),
+}
+
+impl fmt::Display for Piece {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Piece::BadRock => write!(f, "💀"),
+            Piece::GoodRock | Piece::GoodRock2 => write!(f, "🪨"),
+            Piece::Token(color, token) => {
+                match color {
+                    Color::White => write!(f, "{}", format!("{}", token).on_white()),
+                    Color::Black => write!(f, "{}", format!("{}", token).on_black()),
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -53,13 +81,27 @@ pub enum Token {
     Bomb,
 }
 
+impl fmt::Display for Token {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Token::Daimyo => write!(f, "🧙"),
+            Token::Scout => write!(f, "🥾"),
+            Token::Hammer => write!(f, "🔨"),
+            Token::Hook => write!(f, "🪝"),
+            Token::Wave => write!(f, "🌊"),
+            Token::Hand => write!(f, "🤏"),
+            Token::Bomb => write!(f, "💣"),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum TurnState {
     WhiteFirstAction,
     WhiteSecondAction { used_piece: Option<Token> },
     BlackFirstAction,
     BlackSecondAction { used_piece: Option<Token> },
-    WonBy(Color),
+    WonBy(Option<Color>),
 }
 
 impl TurnState {
@@ -87,7 +129,14 @@ impl TurnState {
 impl mcts::Outcome<Color> for TurnState {
     fn reward_for(&self, color: Color) -> f64 {
         match self {
-            TurnState::WonBy(winner) => if *winner == color { 1.0 } else { 0.0 },
+            TurnState::WonBy(result) => {
+                if let Some(winner) = result {
+                    if *winner == color { 1.0 } else { 0.0 }
+                }
+                else {
+                    0.5
+                }
+            }
             _ => 0.0,
         }
     }
@@ -142,24 +191,18 @@ impl Board {
             spaces: [[Space::Empty; 11]; 11],
         };
         board.set_space(Coordinates(0, 0, 0), Space::Occupied(Piece::BadRock));
-        board.set_space(Coordinates(0, -4, 4), Space::Occupied(Piece::GoodRock));
-        board.set_space(Coordinates(0, 4, -4), Space::Occupied(Piece::GoodRock2));
-        board.set_space(Coordinates(2, -1, -1), Space::Occupied(Piece::Token(Color::White, Token::Daimyo)));
-        board.set_space(Coordinates(-2, 1, 1), Space::Occupied(Piece::Token(Color::Black, Token::Daimyo)));
+        board.set_space(Coordinates(-4, 0, 4), Space::Occupied(Piece::GoodRock));
+        board.set_space(Coordinates(4, 0, -4), Space::Occupied(Piece::GoodRock2));
+        board.set_space(Coordinates(-1, 2, -1), Space::Occupied(Piece::Token(Color::White, Token::Daimyo)));
+        board.set_space(Coordinates(1, -2, 1), Space::Occupied(Piece::Token(Color::Black, Token::Daimyo)));
         board
     }
 
     pub fn get_space(&self, coord: Coordinates) -> Space {
-        if coord.2 != -coord.0 - coord.1 {
-            panic!("Tried to access space that does not exist");
-        }
         self.spaces[(coord.0 + 5) as usize][(coord.1 + 5) as usize]
     }
 
     pub fn set_space(&mut self, coord: Coordinates, space: Space) {
-        if coord.2 != -coord.0 - coord.1 {
-            panic!("Tried to access space that does not exist");
-        }
         self.spaces[(coord.0 + 5) as usize][(coord.1 + 5) as usize] = space;
     }
 
@@ -175,8 +218,8 @@ impl Board {
 
     fn gate_coords(&self, color: Color) -> Coordinates {
         match color {
-            Color::Black => Coordinates(-4, 2, 2),
-            Color::White => Coordinates(4, -2, -2),
+            Color::Black => Coordinates(2, -4, 2),
+            Color::White => Coordinates(-2, 4, -2),
         }
     }
 
@@ -194,7 +237,9 @@ impl Board {
 
     pub fn find(&self, piece: Piece) -> Option<Coordinates> {
         for q in -5..=5 {
-            for r in -5..=5 {
+            let r_min = std::cmp::max(-5, -5 - q);
+            let r_max = std::cmp::min(5, 5 - q);
+            for r in r_min..=r_max {
                 let s = -q - r;
                 match self.get_space(Coordinates(q, r, s)) {
                     Space::Occupied(piece_on_space) => {
@@ -209,10 +254,31 @@ impl Board {
         None
     }
 
+    pub fn find_all_of_color<'a>(&'a self, target_color: Color) -> impl Iterator<Item = (Token, Coordinates)> + 'a {
+        (-5..=5).flat_map(move |q| {
+            let r_min = std::cmp::max(-5, -5 - q);
+            let r_max = std::cmp::min(5, 5 - q);
+            (r_min..=r_max).filter_map(move |r| {
+                let s = -q - r;
+                match self.get_space(Coordinates(q, r, s)) {
+                    Space::Occupied(Piece::Token(color, token)) => {
+                        if color == target_color {
+                            Some((token, Coordinates(q, r, s)))
+                        }
+                        else {
+                            None
+                        }
+                    }
+                    _ => None
+                }
+            })
+        })
+    }
+
     pub fn is_in_village(&self, coordinates: Coordinates, color: Color) -> bool {
         match color {
-            Color::Black => coordinates.0 <= -4,
-            Color::White => coordinates.0 >= 4,
+            Color::Black => coordinates.1 <= -4,
+            Color::White => coordinates.1 >= 4,
         }
     }
 
@@ -221,18 +287,55 @@ impl Board {
     }
 
     fn print(&self) {
-        for q in -5..=5 {
-            for r in -5..=5 {
-                let s = -q - r;
-                let coordinates = Coordinates(q, r, s);
-                match self.get_space(coordinates) {
-                    Space::Occupied(piece) => {
-                        println!("{:?} - {:?}", coordinates, piece);
-                    }
-                    Space::Empty => {}
-                }
-            }
-        }
+        //for q in -5..=5 {
+        //    for r in -5..=5 {
+        //        let s = -q - r;
+        //        let coordinates = Coordinates(q, r, s);
+        //        match self.get_space(coordinates) {
+        //            Space::Occupied(piece) => {
+        //                println!("{:?} - {:?}", coordinates, piece);
+        //            }
+        //            Space::Empty => {}
+        //        }
+        //    }
+        //}
+        println!(
+"
+          {0}  {1}  {2}  {3}  {4}  {5}
+        {6}  {7}  {8}  {9}  {10}  {11}  {12}
+      {13}  {14}  {15}  {16}  {17}  {18}  {19}  {20}
+    {21}  {22}  {23}  {24}  {25}  {26}  {27}  {28}  {29}
+  {30}  {31}  {32}  {33}  {34}  {35}  {36}  {37}  {38}  {39}
+{40}  {41}  {42}  {43}  {44}  {45}  {46}  {47}  {48}  {49}  {50}
+  {51}  {52}  {53}  {54}  {55}  {56}  {57}  {58}  {59}  {60}
+    {61}  {62}  {63}  {64}  {65}  {66}  {67}  {68}  {69}
+      {70}  {71}  {72}  {73}  {74}  {75}  {76}  {77}
+        {78}  {79}  {80}  {81}  {82}  {83}  {84}
+          {85}  {86}  {87}  {88}  {89}  {90}
+",
+self.get_space(Coordinates(0, -5, 5)), self.get_space(Coordinates(1, -5, 4)), self.get_space(Coordinates(2, -5, 3)), self.get_space(Coordinates(3, -5, 2)), self.get_space(Coordinates(4, -5, 1)), self.get_space(Coordinates(5, -5, 0)),
+
+self.get_space(Coordinates(-1, -4, 5)), self.get_space(Coordinates(0, -4, 4)), self.get_space(Coordinates(1, -4, 3)), self.get_space(Coordinates(2, -4, 2)), self.get_space(Coordinates(3, -4, 1)), self.get_space(Coordinates(4, -4, 0)), self.get_space(Coordinates(5, -4, -1)),
+
+self.get_space(Coordinates(-2, -3, 5)), self.get_space(Coordinates(-1, -3, 4)), self.get_space(Coordinates(0, -3, 3)), self.get_space(Coordinates(1, -3, 2)), self.get_space(Coordinates(2, -3, 1)), self.get_space(Coordinates(3, -3, 0)), self.get_space(Coordinates(4, -3, -1)), self.get_space(Coordinates(5, -3, -2)),
+
+self.get_space(Coordinates(-3, -2, 5)), self.get_space(Coordinates(-2, -2, 4)), self.get_space(Coordinates(-1, -2, 3)), self.get_space(Coordinates(0, -2, 2)), self.get_space(Coordinates(1, -2, 1)), self.get_space(Coordinates(2, -2, 0)), self.get_space(Coordinates(3, -2, -1)), self.get_space(Coordinates(4, -2, -2)), self.get_space(Coordinates(5, -2, -3)),
+
+self.get_space(Coordinates(-4, -1, 5)), self.get_space(Coordinates(-3, -1, 4)), self.get_space(Coordinates(-2, -1, 3)), self.get_space(Coordinates(-1, -1, 2)), self.get_space(Coordinates(0, -1, 1)), self.get_space(Coordinates(1, -1, 0)), self.get_space(Coordinates(2, -1, -1)), self.get_space(Coordinates(3, -1, -2)), self.get_space(Coordinates(4, -1, -3)), self.get_space(Coordinates(5, -1, -4)),
+
+self.get_space(Coordinates(-5, 0, 5)), self.get_space(Coordinates(-4, 0, 4)), self.get_space(Coordinates(-3, 0, 3)), self.get_space(Coordinates(-2, 0, 2)), self.get_space(Coordinates(-1, 0, 1)), self.get_space(Coordinates(0, 0, 0)), self.get_space(Coordinates(1, 0, -1)), self.get_space(Coordinates(2, 0, -2)), self.get_space(Coordinates(3, 0, -3)), self.get_space(Coordinates(4, 0, -4)), self.get_space(Coordinates(5, 0, -5)),
+
+self.get_space(Coordinates(-5, 1, 4)), self.get_space(Coordinates(-4, 1, 3)), self.get_space(Coordinates(-3, 1, 2)), self.get_space(Coordinates(-2, 1, 1)), self.get_space(Coordinates(-1, 1, 0)), self.get_space(Coordinates(0, 1, -1)), self.get_space(Coordinates(1, 1, -2)), self.get_space(Coordinates(2, 1, -3)), self.get_space(Coordinates(3, 1, -4)), self.get_space(Coordinates(4, 1, -5)),
+
+self.get_space(Coordinates(-5, 2, 3)), self.get_space(Coordinates(-4, 2, 2)), self.get_space(Coordinates(-3, 2, 1)), self.get_space(Coordinates(-2, 2, 0)), self.get_space(Coordinates(-1, 2, -1)), self.get_space(Coordinates(0, 2, -2)), self.get_space(Coordinates(1, 2, -3)), self.get_space(Coordinates(2, 2, -4)), self.get_space(Coordinates(3, 2, -5)),
+
+self.get_space(Coordinates(-5, 3, 2)), self.get_space(Coordinates(-4, 3, 1)), self.get_space(Coordinates(-3, 3, 0)), self.get_space(Coordinates(-2, 3, -1)), self.get_space(Coordinates(-1, 3, -2)), self.get_space(Coordinates(0, 3, -3)), self.get_space(Coordinates(1, 3, -4)), self.get_space(Coordinates(2, 3, -5)),
+
+self.get_space(Coordinates(-5, 4, 1)), self.get_space(Coordinates(-4, 4, 0)), self.get_space(Coordinates(-3, 4, -1)), self.get_space(Coordinates(-2, 4, -2)), self.get_space(Coordinates(-1, 4, -3)), self.get_space(Coordinates(0, 4, -4)), self.get_space(Coordinates(1, 4, -5)),
+
+self.get_space(Coordinates(-5, 5, 0)), self.get_space(Coordinates(-4, 5, -1)), self.get_space(Coordinates(-3, 5, -2)), self.get_space(Coordinates(-2, 5, -3)), self.get_space(Coordinates(-1, 5, -4)), self.get_space(Coordinates(0, 5, -5)),
+)
+
     }
 
     fn swap(&mut self, target: Coordinates, destination: Coordinates) {
@@ -249,6 +352,7 @@ pub struct Game {
     pub supplies: [Vec<Token>; 2],  // [white_supply, black_supply]
     pub hand_directions: [Direction; 2],  // [white_hand, black_hand]
     pub turn_state: TurnState,
+    pub choice_number: u32,
 }
 
 impl Game {
@@ -261,21 +365,22 @@ impl Game {
             ],
             hand_directions: [Direction::Left, Direction::Right],
             turn_state: TurnState::WhiteFirstAction,
+            choice_number: 0,
         }
     }
 
     fn push(&mut self, target: Coordinates, direction: Direction, distance: usize) {
-        let current_position = target;
-        let next_position = target + direction;
+        let mut previous_position = target;
+        let mut next_position = target + direction;
         for _ in 0..distance {
             if next_position.is_off_board() {
-                match self.board.get_space(target) {
+                match self.board.get_space(previous_position) {
                     Space::Occupied(Piece::GoodRock) => {},
                     Space::Occupied(Piece::GoodRock2) => {},
                     Space::Occupied(Piece::BadRock) => {},
                     Space::Occupied(Piece::Token(color, token)) => {
                         self.supplies[color as usize].push(token);
-                        self.board.set_space(current_position, Space::Empty);
+                        self.board.set_space(previous_position, Space::Empty);
                     },
                     Space::Empty => panic!("Attempted to push empty space"),
                 }
@@ -283,17 +388,22 @@ impl Game {
             }
 
             if self.board.is_empty(next_position) {
-                self.board.move_to(current_position, next_position);
+                self.board.move_to(previous_position, next_position);
             }
+            else {
+                break;
+            }
+
+            previous_position = next_position;
+            next_position = next_position + direction;
         }
     }
 
     fn cascading_push(&mut self, target: Coordinates, direction: Direction, distance: usize) {
-        let next_position = target + direction;
-        if !next_position.is_off_board() && !self.board.is_empty(next_position) {
-            self.cascading_push(next_position, direction, distance);
-        }
         if !target.is_off_board() && !self.board.is_empty(target) {
+            let next_position = target + direction;
+            self.cascading_push(next_position, direction, distance);
+
             self.push(target, direction, distance);
         }
     }
@@ -366,7 +476,8 @@ impl mcts::Game for Game {
     type Outcome = TurnState;
 
     fn get_all_choices(&self) -> Vec<Self::Choice> {
-        let mut choices = vec![Choice::Pass];
+        let mut choices = Vec::with_capacity(32);
+        choices.push(Choice::Pass);
         match self.turn_state.get_matchable() {
             Some((color, used_piece)) => {
                 let mut grabbed_space = None;
@@ -533,7 +644,7 @@ impl mcts::Game for Game {
                             }
                             Ability::Hook { target, direction, distance } => {
                                 used_piece = Some(Token::Hook);
-                                self.push(*target, direction.opposite(), *distance);
+                                self.push(*target, *direction, *distance);
                             }
                             Ability::Bomb { origin } => {
                                 used_piece = Some(Token::Bomb);
@@ -558,21 +669,21 @@ impl mcts::Game for Game {
         let good_rock_2_coordinates = self.board.find(Piece::GoodRock2).unwrap();
 
         if self.board.is_in_village(bad_rock_coordinates, Color::White) {
-            self.turn_state = TurnState::WonBy(Color::Black);
+            self.turn_state = TurnState::WonBy(Some(Color::Black));
         }
         if self.board.is_in_village(bad_rock_coordinates, Color::Black) {
-            self.turn_state = TurnState::WonBy(Color::White);
+            self.turn_state = TurnState::WonBy(Some(Color::White));
         }
 
         if self.board.is_in_village(good_rock_coordinates, Color::White) &&
             self.board.is_in_village(good_rock_2_coordinates, Color::White)
         {
-            self.turn_state = TurnState::WonBy(Color::White);
+            self.turn_state = TurnState::WonBy(Some(Color::White));
         }
         if self.board.is_in_village(good_rock_coordinates, Color::Black) &&
             self.board.is_in_village(good_rock_2_coordinates, Color::Black)
         {
-            self.turn_state = TurnState::WonBy(Color::Black);
+            self.turn_state = TurnState::WonBy(Some(Color::Black));
         }
 
         match self.turn_state {
@@ -583,6 +694,7 @@ impl mcts::Game for Game {
             TurnState::WonBy(_) => {},
         }
 
+        self.choice_number += 1;
     }
 
     fn status(&self) -> mcts::Status<Self::PlayerId, Self::Outcome> {
@@ -592,18 +704,39 @@ impl mcts::Game for Game {
             TurnState::WonBy(_) => mcts::Status::Terminated(self.turn_state.clone())
         }
     }
+
+    fn heuristic_early_terminate(&self) -> Option<TurnState> {
+        if self.choice_number > 26 {
+            let bad_rock_coordinates = self.board.find(Piece::BadRock).unwrap();
+            if bad_rock_coordinates.1 < 0 {
+               //Some(TurnState::WonBy(Some(Color::White)))
+               Some(TurnState::WonBy(None))
+            }
+            else if bad_rock_coordinates.1 > 0 {
+               //Some(TurnState::WonBy(Some(Color::Black)))
+               Some(TurnState::WonBy(None))
+            }
+            else {
+               Some(TurnState::WonBy(None))
+            }
+        }
+        else {
+            None
+        }
+    }
 }
 
 fn main() {
-    let iterations = 10000;
+    let iterations = 1000000;
     let mut game = Game::new();
     let mut mcts: VanillaMcts<Game> = VanillaMcts::new();
+    game.board.print();
+    println!("------");
     loop {
         match game.status() {
             Status::AwaitingAction(_) => {
                 let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), iterations);
 
-                game.board.print();
                 println!("{:?} - {}", game.turn_state.get_color(), choice);
 
                 game.apply_choice(&choice);
@@ -624,3 +757,4 @@ fn main() {
 // Can Daimyo teleport itself?
 // What orientation does Hand deploy in (not clarified in rules)?
 // Does Daimyo change hand direction?
+// TODO make the player choose direction to deploy hand in

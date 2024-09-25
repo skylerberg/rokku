@@ -157,6 +157,9 @@ pub trait MonteCarloTreeSearch {
                     return outcome;
                 }
             }
+            if let Some(outcome) = game.heuristic_early_terminate() {
+                return outcome;
+            }
         }
     }
 

@@ -47,8 +47,8 @@ pub trait Game: Clone {
         self.get_all_choices().choose(&mut rng).unwrap().clone()
     }
 
-    fn heuristic_early_terminate(&self) -> bool {
-        false
+    fn heuristic_early_terminate(&self) -> Option<Self::Outcome> {
+        None
     }
 
     fn get_reward_for_outcome(&self, player_id: Self::PlayerId, outcome: &Self::Outcome) -> f64 {
