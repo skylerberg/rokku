@@ -10,7 +10,6 @@ use strum_macros::EnumIter;
 use colored::Colorize;
 
 use mcts::MonteCarloTreeSearch;
-use mcts::Status;
 use mcts::VanillaMcts;
 
 
@@ -121,22 +120,6 @@ impl TurnState {
         }
         else {
             None
-        }
-    }
-}
-
-impl mcts::Outcome<Color> for TurnState {
-    fn reward_for(&self, color: Color) -> f64 {
-        match self {
-            TurnState::WonBy(result) => {
-                if let Some(winner) = result {
-                    if *winner == color { 1.0 } else { 0.0 }
-                }
-                else {
-                    0.5
-                }
-            }
-            _ => 0.0,
         }
     }
 }
@@ -472,8 +455,6 @@ impl mcts::Game for Game {
 
     type PlayerId = Color;
 
-    type Outcome = TurnState;
-
     fn get_all_choices(&self) -> Vec<Self::Choice> {
         let mut choices = Vec::with_capacity(32);
         choices.push(Choice::Pass);
@@ -702,31 +683,44 @@ impl mcts::Game for Game {
         self.choice_number += 1;
     }
 
-    fn status(&self) -> mcts::Status<Self::PlayerId, Self::Outcome> {
-        match self.turn_state {
-            TurnState::WhiteFirstAction | TurnState::WhiteSecondAction {..} => mcts::Status::AwaitingAction(Color::White),
-            TurnState::BlackFirstAction | TurnState::BlackSecondAction {..} => mcts::Status::AwaitingAction(Color::Black),
-            TurnState::WonBy(_) => mcts::Status::Terminated(self.turn_state.clone())
+    fn heuristic_early_terminate(&self) -> bool {
+        if self.choice_number > 50 {
+            true
+        }
+        else {
+            false
         }
     }
 
-    fn heuristic_early_terminate(&self) -> Option<TurnState> {
-        if self.choice_number > 50 {
-            let bad_rock_coordinates = self.board.find(Piece::BadRock).unwrap();
-            if bad_rock_coordinates.1 < 0 {
-               //Some(TurnState::WonBy(Some(Color::White)))
-               Some(TurnState::WonBy(None))
-            }
-            else if bad_rock_coordinates.1 > 0 {
-               //Some(TurnState::WonBy(Some(Color::Black)))
-               Some(TurnState::WonBy(None))
-            }
-            else {
-               Some(TurnState::WonBy(None))
-            }
+    fn get_active_player_id(&self) -> Self::PlayerId {
+        match self.turn_state {
+            TurnState::WhiteFirstAction | TurnState::WhiteSecondAction {..} => Color::White,
+            TurnState::BlackFirstAction | TurnState::BlackSecondAction {..} => Color::Black,
+            TurnState::WonBy(_) => panic!("Attempted to get active player in terminal game"),
         }
-        else {
-            None
+    }
+
+    fn is_terminal(&self) -> bool {
+        match self.turn_state {
+            TurnState::WhiteFirstAction
+                | TurnState::WhiteSecondAction {..}
+                | TurnState::BlackFirstAction
+                | TurnState::BlackSecondAction {..} => false,
+            TurnState::WonBy(_) => true,
+        }
+    }
+
+    fn reward_for(&self, color: Color) -> f64 {
+        match self.turn_state {
+            TurnState::WonBy(result) => {
+                if let Some(winner) = result {
+                    if winner == color { 1.0 } else { 0.0 }
+                }
+                else {
+                    0.5
+                }
+            }
+            _ => 0.0,
         }
     }
 }
@@ -744,22 +738,14 @@ fn main() {
     //game.apply_choice(&Choice::UseAbility(Ability::Daimyo { target: Coordinates(2, -4, 2), destination: Coordinates(0, 0, 0)}));
     game.board.print();
     println!("------");
-    loop {
-        match game.status() {
-            Status::AwaitingAction(_) => {
-                let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), iterations);
+    while !game.is_terminal() {
+        let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), iterations);
+        println!("{:?} - {}", game.turn_state.get_color(), choice);
 
-                println!("{:?} - {}", game.turn_state.get_color(), choice);
+        game.apply_choice(&choice);
 
-                game.apply_choice(&choice);
-
-                game.board.print();
-                println!("------");
-            }
-            Status::Terminated(_) => {
-                return;
-            }
-        }
+        game.board.print();
+        println!("------");
     }
 }
 
