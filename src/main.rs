@@ -8,7 +8,6 @@ use std::ops;
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use colored::Colorize;
-use auto_enums::auto_enum;
 
 use mcts::MonteCarloTreeSearch;
 use mcts::Status;
@@ -412,7 +411,7 @@ impl Game {
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Choice {
     Pass,
-    Deploy(Token),
+    Deploy(Token, Option<Direction>),
     Move(Token, Direction),
     UseAbility(Ability),
 }
@@ -455,7 +454,7 @@ impl fmt::Display for Choice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Choice::Pass => write!(f, "Pass"),
-            Choice::Deploy(token) => write!(f, "Deploy {:?}", token),
+            Choice::Deploy(token, direction) => write!(f, "Deploy {:?} {:?}", token, direction),
             Choice::Move(token, direction) => write!(f, "Move {:?} {:?}", token, direction),
             Choice::UseAbility(ability) => write!(f, "Use ability {:?}", ability),
         }
@@ -485,123 +484,126 @@ impl mcts::Game for Game {
                     grabbed_space = Some(hand_space + self.hand_directions[color.opposite() as usize]);
                 }
 
-                for token in Token::iter() {
+                for (token, coordinates) in self.board.find_all_of_color(color) {
                     if used_piece == Some(token) {
                         continue
                     }
 
-                    if let Some(coordinates) = self.board.find(Piece::Token(color, token)) {
-                        if let Some(space) = grabbed_space {
-                            if coordinates == space {
-                                continue;
+                    if let Some(space) = grabbed_space {
+                        if coordinates == space {
+                            continue;
+                        }
+                    }
+
+                    // Hand's move is implement as an ability
+                    if token != Token::Hand {
+                        // Basic move
+                        for direction in Direction::iter() {
+                            let new_coordinates = coordinates + direction;
+                            if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
+                                choices.push(Choice::Move(token, direction));
                             }
                         }
+                    }
 
-                        // Hand's move is implement as an ability
-                        if token != Token::Hand {
-                            // Basic move
+                    // Abilities
+                    match token {
+                        Token::Daimyo => {
+                            for (other_token, target) in self.board.find_all_of_color(color) {
+                                if other_token != Token::Daimyo {
+                                    if let Some(space) = grabbed_space {
+                                        if target == space {
+                                            continue;
+                                        }
+                                    }
+
+                                    for direction in Direction::iter() {
+                                        let destination = coordinates + direction;
+                                        if !destination.is_off_board() && self.board.is_empty(coordinates + direction) {
+                                            choices.push(Choice::UseAbility(Ability::Daimyo { target, destination }));
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        Token::Scout => {
                             for direction in Direction::iter() {
-                                let new_coordinates = coordinates + direction;
-                                if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
-                                    choices.push(Choice::Move(token, direction));
+                                let mut destination = coordinates + direction ;
+                                if !destination.is_off_board() && !self.board.is_empty(destination) {
+                                    choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
+                                }
+                                destination = destination + direction;
+                                if !destination.is_off_board() && !self.board.is_empty(destination) {
+                                    choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
                                 }
                             }
-                        }
-
-                        // Abilities
-                        match token {
-                            Token::Daimyo => {
-                                for other_token in Token::iter() {
-                                    if other_token != Token::Daimyo && !self.supplies[color as usize].contains(&other_token) {
-                                        let target = self.board.find(Piece::Token(color, other_token)).unwrap();
-
-                                        if let Some(space) = grabbed_space {
-                                            if target == space {
-                                                continue;
-                                            }
-                                        }
-
-                                        for direction in Direction::iter() {
-                                            let destination = coordinates + direction;
-                                            if !destination.is_off_board() && self.board.is_empty(coordinates + direction) {
-                                                choices.push(Choice::UseAbility(Ability::Daimyo { target, destination }));
-                                            }
-                                        }
+                        },
+                        Token::Hammer => {
+                            for direction in Direction::iter() {
+                                let target = coordinates + direction;
+                                if !target.is_off_board() && !self.board.is_empty(target) {
+                                    for distance in 1..=3 {
+                                        choices.push(Choice::UseAbility(Ability::Hammer{target, direction, distance}));
                                     }
                                 }
-                            },
-                            Token::Scout => {
-                                for direction in Direction::iter() {
-                                    let mut destination = coordinates + direction ;
-                                    if !destination.is_off_board() && !self.board.is_empty(destination) {
-                                        choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
+                            }
+                        },
+                        Token::Hook => {
+                            for direction in Direction::iter() {
+                                for distance_to_target in 2..=4 {
+                                    let mut target = coordinates;
+                                    for _ in 0..distance_to_target {
+                                        target = target + direction;
                                     }
-                                    destination = destination + direction;
-                                    if !destination.is_off_board() && !self.board.is_empty(destination) {
-                                        choices.push(Choice::UseAbility(Ability::Scout{target: coordinates, destination}));
-                                    }
-                                }
-                            },
-                            Token::Hammer => {
-                                for direction in Direction::iter() {
-                                    let target = coordinates + direction;
                                     if !target.is_off_board() && !self.board.is_empty(target) {
-                                        for distance in 1..=3 {
-                                            choices.push(Choice::UseAbility(Ability::Hammer{target, direction, distance}));
+                                        for distance_to_pull in 1..distance_to_target {
+                                            choices.push(Choice::UseAbility(Ability::Hook {
+                                                target,
+                                                direction: direction.opposite(),
+                                                distance: distance_to_pull,
+                                            }));
                                         }
                                     }
                                 }
-                            },
-                            Token::Hook => {
-                                for direction in Direction::iter() {
-                                    for distance_to_target in 2..=4 {
-                                        let mut target = coordinates;
-                                        for _ in 0..distance_to_target {
-                                            target = target + direction;
-                                        }
-                                        if !target.is_off_board() && !self.board.is_empty(target) {
-                                            for distance_to_pull in 1..distance_to_target {
-                                                choices.push(Choice::UseAbility(Ability::Hook {
-                                                    target,
-                                                    direction: direction.opposite(),
-                                                    distance: distance_to_pull,
-                                                }));
-                                            }
-                                        }
+                            }
+                        },
+                        Token::Wave => {
+                            // TODO implement buffed version of Wave
+                            for direction in Direction::iter() {
+                                let target = coordinates + direction;
+                                if !target.is_off_board() && !self.board.is_empty(target) {
+                                    let destination = coordinates + direction.opposite();
+                                    if !destination.is_off_board() && self.board.is_empty(destination) {
+                                        choices.push(Choice::UseAbility(Ability::Wave{target, destination}));
                                     }
                                 }
-                            },
-                            Token::Wave => {
-                                // TODO implement buffed version of Wave
-                                for direction in Direction::iter() {
-                                    let target = coordinates + direction;
-                                    if !target.is_off_board() && !self.board.is_empty(target) {
-                                        let destination = coordinates + direction.opposite();
-                                        if !destination.is_off_board() && self.board.is_empty(destination) {
-                                            choices.push(Choice::UseAbility(Ability::Wave{target, destination}));
-                                        }
+                            }
+                        },
+                        Token::Hand => {
+                            for move_direction in Direction::iter() {
+                                let new_coordinates = coordinates + move_direction;
+                                if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
+                                    for hand_direction in Direction::iter() {
+                                        choices.push(Choice::UseAbility(Ability::Hand{origin: coordinates, move_direction, hand_direction}));
                                     }
                                 }
-                            },
-                            Token::Hand => {
-                                for move_direction in Direction::iter() {
-                                    let new_coordinates = coordinates + move_direction;
-                                    if !new_coordinates.is_off_board() && self.board.is_empty(new_coordinates) {
-                                        for hand_direction in Direction::iter() {
-                                            choices.push(Choice::UseAbility(Ability::Hand{origin: coordinates, move_direction, hand_direction}));
-                                        }
-                                    }
-                                }
-                            },
-                            Token::Bomb => {
-                                choices.push(Choice::UseAbility(Ability::Bomb{ origin: coordinates }));
-                            },
-                        }
+                            }
+                        },
+                        Token::Bomb => {
+                            choices.push(Choice::UseAbility(Ability::Bomb{ origin: coordinates }));
+                        },
                     }
                 }
                 if self.board.gate_is_empty(color) {
                     for token in self.supplies[color as usize].iter() {
-                        choices.push(Choice::Deploy(*token));
+                        if *token == Token::Hand {
+                            for direction in Direction::iter() {
+                                choices.push(Choice::Deploy(*token, Some(direction)));
+                            }
+                        }
+                        else {
+                            choices.push(Choice::Deploy(*token, None));
+                        }
                     }
                 }
             },
@@ -616,9 +618,12 @@ impl mcts::Game for Game {
             Some((color, _)) => {
                 match choice {
                     Choice::Pass => {},
-                    Choice::Deploy(token) => {
+                    Choice::Deploy(token, direction) => {
                         self.supplies[color as usize].retain(|&t| t != *token);
                         self.board.deploy(color, *token);
+                        if let Some(direction) = direction {
+                            self.hand_directions[color as usize] = *direction;
+                        }
                     },
                     Choice::Move(token, direction) => {
                         self.board.move_piece(Piece::Token(color, *token), *direction);
@@ -706,7 +711,7 @@ impl mcts::Game for Game {
     }
 
     fn heuristic_early_terminate(&self) -> Option<TurnState> {
-        if self.choice_number > 26 {
+        if self.choice_number > 50 {
             let bad_rock_coordinates = self.board.find(Piece::BadRock).unwrap();
             if bad_rock_coordinates.1 < 0 {
                //Some(TurnState::WonBy(Some(Color::White)))
@@ -730,6 +735,13 @@ fn main() {
     let iterations = 1000000;
     let mut game = Game::new();
     let mut mcts: VanillaMcts<Game> = VanillaMcts::new();
+    //game.apply_choice(&Choice::Deploy(Token::Hammer, None));
+    //game.apply_choice(&Choice::UseAbility(Ability::Daimyo { target: Coordinates(-2, 4, -2), destination: Coordinates(0, 1, -1)}));
+    //game.apply_choice(&Choice::Move(Token::Daimyo, Direction::DownLeft));
+    //game.apply_choice(&Choice::Deploy(Token::Hand, Some(Direction::DownLeft)));
+    //game.apply_choice(&Choice::UseAbility(Ability::Daimyo { target: Coordinates(0, 1, -1), destination: Coordinates(-1, 1, 0)}));
+    //game.apply_choice(&Choice::UseAbility(Ability::Hammer { target: Coordinates(0, 0, 0), direction: Direction::UpRight, distance: 2 }));
+    //game.apply_choice(&Choice::UseAbility(Ability::Daimyo { target: Coordinates(2, -4, 2), destination: Coordinates(0, 0, 0)}));
     game.board.print();
     println!("------");
     loop {
@@ -757,4 +769,3 @@ fn main() {
 // Can Daimyo teleport itself?
 // What orientation does Hand deploy in (not clarified in rules)?
 // Does Daimyo change hand direction?
-// TODO make the player choose direction to deploy hand in
