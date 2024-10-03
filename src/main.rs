@@ -49,7 +49,7 @@ pub enum Piece {
 impl fmt::Display for Piece {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Piece::BadRock => write!(f, "💀"),
+            Piece::BadRock => write!(f, "{}", String::from("🪨").on_red()),
             Piece::GoodRock | Piece::GoodRock2 => write!(f, "🪨"),
             Piece::Token(color, token) => {
                 match color {
