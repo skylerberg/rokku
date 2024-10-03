@@ -15,6 +15,14 @@ use mcts::VanillaMcts;
 
 use mcts::Game as MctsGame;
 
+
+const USE_VARIANT_PIT_OF_MISFORTUNE: bool = true;
+const USE_VARIANT_PERMA_DEATH: bool = true;
+const USE_VARIANT_REVIVE_ACTION: bool = true;
+const USE_VARIANT_END_IF_GOOD_ROCK_IN_BOTH_VILLAGES: bool = true;
+
+const CENTER_SPACE: Coordinates = Coordinates(0, 0, 0);
+
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum Space {
     Empty,
@@ -172,7 +180,7 @@ impl Board {
         let mut board = Board {
             spaces: [[Space::Empty; 11]; 11],
         };
-        board.set_space(Coordinates(0, 0, 0), Space::Occupied(Piece::BadRock));
+        board.set_space(CENTER_SPACE, Space::Occupied(Piece::BadRock));
         board.set_space(Coordinates(-4, 0, 4), Space::Occupied(Piece::GoodRock));
         board.set_space(Coordinates(4, 0, -4), Space::Occupied(Piece::GoodRock2));
         board.set_space(Coordinates(-1, 2, -1), Space::Occupied(Piece::Token(Color::White, Token::Daimyo)));
@@ -332,6 +340,7 @@ self.get_space(Coordinates(-5, 5, 0)), self.get_space(Coordinates(-4, 5, -1)), s
 pub struct Game {
     pub board: Board,
     pub supplies: [Vec<Token>; 2],  // [white_supply, black_supply]
+    pub graveyards: [Vec<Token>; 2],  // [white_supply, black_supply]
     pub hand_directions: [Direction; 2],  // [white_hand, black_hand]
     pub turn_state: TurnState,
     pub choice_number: u32,
@@ -344,6 +353,10 @@ impl Game {
             supplies: [
                 vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
                 vec![Token::Scout, Token::Hammer, Token::Hook, Token::Wave, Token::Hand, Token::Bomb],
+            ],
+            graveyards: [
+                vec![],
+                vec![],
             ],
             hand_directions: [Direction::Left, Direction::Right],
             turn_state: TurnState::WhiteFirstAction,
@@ -361,7 +374,12 @@ impl Game {
                     Space::Occupied(Piece::GoodRock2) => {},
                     Space::Occupied(Piece::BadRock) => {},
                     Space::Occupied(Piece::Token(color, token)) => {
-                        self.supplies[color as usize].push(token);
+                        if USE_VARIANT_PERMA_DEATH {
+                            self.graveyards[color as usize].push(token);
+                        }
+                        else {
+                            self.supplies[color as usize].push(token);
+                        }
                         self.board.set_space(previous_position, Space::Empty);
                     },
                     Space::Empty => panic!("Attempted to push empty space"),
@@ -397,6 +415,7 @@ pub enum Choice {
     Deploy(Token, Option<Direction>),
     Move(Token, Direction),
     UseAbility(Ability),
+    Revive(Token),
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
@@ -440,6 +459,7 @@ impl fmt::Display for Choice {
             Choice::Deploy(token, direction) => write!(f, "Deploy {:?} {:?}", token, direction),
             Choice::Move(token, direction) => write!(f, "Move {:?} {:?}", token, direction),
             Choice::UseAbility(ability) => write!(f, "Use ability {:?}", ability),
+            Choice::Revive(token) => write!(f, "Revive {:?}", token),
         }
     }
 }
@@ -465,6 +485,7 @@ impl mcts::Game for Game {
                     grabbed_space = Some(hand_space + self.hand_directions[color.opposite() as usize]);
                 }
 
+                // Use token
                 for (token, coordinates) in self.board.find_all_of_color(color) {
                     if used_piece == Some(token) {
                         continue
@@ -575,6 +596,8 @@ impl mcts::Game for Game {
                         },
                     }
                 }
+
+                // Deploy
                 if self.board.gate_is_empty(color) {
                     for token in self.supplies[color as usize].iter() {
                         if *token == Token::Hand {
@@ -585,6 +608,13 @@ impl mcts::Game for Game {
                         else {
                             choices.push(Choice::Deploy(*token, None));
                         }
+                    }
+                }
+
+                // Revive
+                if USE_VARIANT_REVIVE_ACTION {
+                    for token in self.graveyards[color as usize].iter() {
+                        choices.push(Choice::Revive(*token));
                     }
                 }
             },
@@ -645,9 +675,28 @@ impl mcts::Game for Game {
                             }
                         }
                     }
+                    Choice::Revive(token) => {
+                        self.supplies[color as usize].push(*token);
+                        self.graveyards[color as usize].retain(|&t| t != *token);
+                    }
                 }
             }
             None => {},
+        }
+
+        if USE_VARIANT_PIT_OF_MISFORTUNE {
+            match self.board.get_space(CENTER_SPACE) {
+                Space::Occupied(Piece::Token(color, token)) => {
+                    self.board.set_space(CENTER_SPACE, Space::Empty);
+                    if USE_VARIANT_PERMA_DEATH {
+                        self.graveyards[color as usize].push(token)
+                    }
+                    else {
+                        self.supplies[color as usize].push(token)
+                    }
+                },
+                _ => {},
+            }
         }
 
         let bad_rock_coordinates = self.board.find(Piece::BadRock).unwrap();
@@ -670,6 +719,22 @@ impl mcts::Game for Game {
             self.board.is_in_village(good_rock_2_coordinates, Color::Black)
         {
             self.turn_state = TurnState::WonBy(Some(Color::Black));
+        }
+
+        if USE_VARIANT_END_IF_GOOD_ROCK_IN_BOTH_VILLAGES {
+            if self.board.is_in_village(good_rock_coordinates, Color::Black) &&
+                self.board.is_in_village(good_rock_2_coordinates, Color::White) ||
+                (self.board.is_in_village(good_rock_coordinates, Color::White) &&
+                    self.board.is_in_village(good_rock_2_coordinates, Color::Black))
+            {
+                if bad_rock_coordinates.1 < 0 {
+                    self.turn_state = TurnState::WonBy(Some(Color::White));
+                }
+                else if bad_rock_coordinates.1 > 0 {
+                    self.turn_state = TurnState::WonBy(Some(Color::White));
+                }
+                // TODO what should happen if the rock is in the middle?
+            }
         }
 
         match self.turn_state {
