@@ -4,13 +4,13 @@ extern crate strum_macros;
 
 use std::fmt;
 use std::ops;
-use std::marker::PhantomData;
 
 use strum::IntoEnumIterator;
 use strum_macros::EnumIter;
 use colored::Colorize;
 
 use mcts::MonteCarloTreeSearch;
+use mcts::VanillaMcts;
 
 
 use mcts::Game as MctsGame;
@@ -748,6 +748,15 @@ impl mcts::Game for Game {
         self.choice_number += 1;
     }
 
+    fn heuristic_early_terminate(&self) -> bool {
+        if self.choice_number > 50 {
+            true
+        }
+        else {
+            false
+        }
+    }
+
     fn get_active_player_id(&self) -> Self::PlayerId {
         match self.turn_state {
             TurnState::WhiteFirstAction | TurnState::WhiteSecondAction {..} => Color::White,
@@ -781,38 +790,10 @@ impl mcts::Game for Game {
     }
 }
 
-
-#[derive(Clone, Copy, Default)]
-pub struct CustomMcts<G: Game> {
-    starting_turn: usize,
-    phantom: PhantomData<G>,
-}
-
-impl<G: Game> CustomMcts<G> {
-    pub fn new(starting_turn: usize) -> Self {
-        Self {
-            starting_turn,
-            phantom: PhantomData,
-        }
-    }
-}
-
-impl<G: Game> MonteCarloTreeSearch for CustomMcts<G> {
-    type Game = G;
-
-    fn heuristic_early_terminate(&self, game: G) -> bool {
-        if  self.choice_number - self.starting_turn > 50 {
-            true
-        }
-        else {
-            false
-        }
-    }
-}
-
 fn main() {
     let iterations = 1000000;
     let mut game = Game::new();
+    let mut mcts: VanillaMcts<Game> = VanillaMcts::new();
     //game.apply_choice(&Choice::Deploy(Token::Hammer, None));
     //game.apply_choice(&Choice::UseAbility(Ability::Daimyo { target: Coordinates(-2, 4, -2), destination: Coordinates(0, 1, -1)}));
     //game.apply_choice(&Choice::Move(Token::Daimyo, Direction::DownLeft));
@@ -823,7 +804,6 @@ fn main() {
     game.board.print();
     println!("------");
     while !game.is_terminal() {
-        let mut mcts: CustomMcts<Game> = CustomMcts::new(game.choice_number as usize);
         let (choice, _) = mcts.monte_carlo_tree_search(game.clone(), iterations);
         println!("{:?} - {}", game.turn_state.get_color(), choice);
 
@@ -838,4 +818,5 @@ fn main() {
 // Is it possible to tie? Same action puts all three rocks in one player's village?
 // Can a unit intentionally step off the edge of the map?
 // Can Daimyo teleport itself?
+// What orientation does Hand deploy in (not clarified in rules)?
 // Does Daimyo change hand direction?
